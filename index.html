@@ -585,14 +585,21 @@ function riskProject(dateIso, am, min) {
   const cl = K.clim[`${mo}-${dw}`];
   const ro = K.upcoming_roster[dateIso];
   if (cl == null || !ro) return null;
-  // Census for the day is not known at noon; the AM count is its best available proxy, scaled by
-  // how much of a typical day has arrived by this hour. Deliberately crude — the model's census
-  // term is only used to SCALE the composition effect, never as a headline.
-  const frac = Math.min(0.95, Math.max(0.2, min / (24 * 60)));
-  const estN = am / Math.max(frac, 0.2);
+  // The typed count is "arrived since midnight" at time `min`. Project the day's total and the
+  // NOON-equivalent count (the model's AM term is arrivals before 12:00) from this month x DOW's
+  // real hourly pattern and the slopes measured in build_today_risk.py. Until 2026-10-02 this
+  // assumed arrivals were spread evenly over the clock, which put a typical noon reading at ~80
+  // for the day and made the tab go quiet on ~98% of days.
+  const P = K.projection, cc = P.clim_cum[`${mo}-${dw}`];
+  const hr = Math.min(20, Math.max(6, min / 60)), lo = Math.floor(hr), fr = hr - lo;
+  const typBefore = cc[lo] + fr * (cc[Math.min(24, lo + 1)] - cc[lo]);    // typical count by now
+  const hk = String(Math.min(20, Math.max(6, Math.round(hr))));
+  const dev = am - typBefore;
+  const estN = cc[24] + P.k_total[hk] * dev;
+  const amNoon = Math.max(0, cc[12] + P.k_noon[hk] * dev);
   const z = (v, [m, s]) => (v - m) / s;
   // Built by coefficient NAME so the page cannot silently misalign with the builder's design.
-  const feat = {intercept: 1, climatology: cl, am_z: z(am, K.norm.am),
+  const feat = {intercept: 1, climatology: cl, am_z: z(amNoon, K.norm.am),
                 headcount_z: z(ro.hc, K.norm.headcount), flex: ro.flex ?? 0, app_eve: ro.app_eve ?? 0};
   const pred = K.coef.names.reduce((a, n, i) => a + K.coef.values[i] * (feat[n] ?? 0), 0);
   const band = estN < K.quiet_census ? "quiet" : estN < 145 ? "middle" : "busy";
@@ -600,7 +607,7 @@ function riskProject(dateIso, am, min) {
   // where this prediction sits in the alarm table, which is measured not assumed
   let row = null;
   for (const r of K.alarm) if (pred >= r.cut) row = r;
-  return {pred, estN, cl, band, sk, row, hc: ro.hc, comp: ro.comp, flex: ro.flex, flexOpen: ro.flex_open, app: ro.app_eve,
+  return {pred, estN, amNoon, cl, band, sk, row, hc: ro.hc, comp: ro.comp, flex: ro.flex, flexOpen: ro.flex_open, app: ro.app_eve,
           bad: K.bad_day_threshold, reliable: band !== "quiet"};
 }
 
