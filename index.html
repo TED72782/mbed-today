@@ -356,10 +356,15 @@ function waitProject(date, wr, tp, min) {
   const mo = dt.getMonth() + 1, dw = (dt.getDay() + 6) % 7, season = C.season[mo];
   const cl = C.clim[`${mo}-${dw}`], m = C.cuts[String(cut)];
   // The era term is a constant for any date on or after the move, which every live date is.
-  const x = [1, tp - cl.tp[cut], wr - cl.wr[cut], date >= C.move ? 1 : 0];
+  // Roster terms are centred on the roster era's average night (C.roster_default); a date with no
+  // roster shipped is treated as exactly that average night, i.e. contributes nothing.
+  const def = C.roster_default || {flex: 0, app_eve: 0};
+  const ro = (C.upcoming_roster || {})[date] || null, rr = ro || def;
+  const x = [1, tp - cl.tp[cut], wr - cl.wr[cut], date >= C.move ? 1 : 0,
+             rr.flex - def.flex, rr.app_eve - def.app_eve];
   const pred = m.targets.map(h => {
     const co = m.coef[String(h)];
-    return Math.max(0, co.reduce((a, c, i) => a + c * x[i], cl.w[String(h)]));
+    return Math.max(0, co.reduce((a, c, i) => a + c * (x[i] ?? 0), cl.w[String(h)]));
   });
   const pool = m.season_ok.includes(season) ? m.paths.filter(p => p.s === season) : m.paths;
   const peaks = [], byHour = m.targets.map(() => []);
@@ -379,7 +384,15 @@ function waitProject(date, wr, tp, min) {
   const typical = Math.max(...m.targets.map(h => cl.w[String(h)]));
   return {cut, season, p10: qtl(peaks, .1), p50, p90: qtl(peaks, .9), worst, typical,
           hours: m.targets, pred, band: byHour.map(a => [qtl(a, .1), qtl(a, .5), qtl(a, .9)]),
-          pct: pctOf(p50, season), validated: !!(sk && sk.validated), sk};
+          pct: pctOf(p50, season), validated: !!(sk && sk.validated), sk, ro};
+}
+
+// Tonight's roster as the wait model sees it. Not typed — it ships in wait.json.
+function rosterLine(ro) {
+  if (!ro) return `<div class="mute">Tonight's roster not loaded — treated as an average night.</div>`;
+  const app = ro.app_eve === 1 ? "1 evening APP" : `${ro.app_eve} evening APPs`;
+  return `<div class="mute">Tonight's roster: <b>Flex ${ro.flex ? "on" : ro.flex_open ? "open shift, not filled" : "off"}</b> · ${app}${
+    ro.flex ? "" : " — nights without Flex run longer waits; already counted in this estimate"}</div>`;
 }
 
 function waitChart(r) {
@@ -472,6 +485,7 @@ function waitRender() {
       <div class="mute">around ${hh(r.worst)}${r.worst >= 22 ? " — as it almost always does; the wait climbs all evening" : ""}</div>
       <div class="band">likely ${r0(r.p10)}–${r0(r.p90)} min (8 in 10 evenings land in this range)</div>
       ${pctTxt}
+      ${rosterLine(r.ro)}
       ${conf}
     </div>
     <div class="card"><h2>Projected wait tonight, by hour</h2>${waitChart(r)}
@@ -577,15 +591,16 @@ function riskProject(dateIso, am, min) {
   const frac = Math.min(0.95, Math.max(0.2, min / (24 * 60)));
   const estN = am / Math.max(frac, 0.2);
   const z = (v, [m, s]) => (v - m) / s;
-  const cz = z(estN, K.norm.census);
-  const x = [1, cl, z(am, K.norm.am), z(ro.hc, K.norm.headcount), z(ro.comp, K.norm.comp) * cz];
-  const pred = K.coef.values.reduce((a, c, i) => a + c * x[i], 0);
+  // Built by coefficient NAME so the page cannot silently misalign with the builder's design.
+  const feat = {intercept: 1, climatology: cl, am_z: z(am, K.norm.am),
+                headcount_z: z(ro.hc, K.norm.headcount), flex: ro.flex ?? 0, app_eve: ro.app_eve ?? 0};
+  const pred = K.coef.names.reduce((a, n, i) => a + K.coef.values[i] * (feat[n] ?? 0), 0);
   const band = estN < K.quiet_census ? "quiet" : estN < 145 ? "middle" : "busy";
   const sk = K.skill.by_census[band];
   // where this prediction sits in the alarm table, which is measured not assumed
   let row = null;
   for (const r of K.alarm) if (pred >= r.cut) row = r;
-  return {pred, estN, cl, band, sk, row, hc: ro.hc, comp: ro.comp,
+  return {pred, estN, cl, band, sk, row, hc: ro.hc, comp: ro.comp, flex: ro.flex, flexOpen: ro.flex_open, app: ro.app_eve,
           bad: K.bad_day_threshold, reliable: band !== "quiet"};
 }
 
@@ -624,7 +639,8 @@ function riskRender() {
         <div class="big">${r0(r.pred)} min</div>
         <div class="band">a typical ${esc(new Date(today + "T12:00:00").toLocaleDateString("en-US", {weekday: "long"}))}
           this month is ${r0(r.cl)} min · a bad day starts around ${r0(r.bad)}</div>
-        <div class="band">tracking toward <b>${r0(r.estN)}</b> arrivals · roster <b>${r.hc}</b> providers${
+        <div class="band">tracking toward <b>${r0(r.estN)}</b> arrivals · roster <b>${r.hc}</b> providers seeing patients${
+          r.flex == null ? "" : ` · Flex ${r.flex ? "on" : r.flexOpen ? "<b>open shift, not filled</b>" : "<b>off</b>"}`}${
           r.comp > 0 ? ", slower than average" : r.comp < 0 ? ", faster than average" : ""}</div>
         <span class="badge ${over ? "warn" : "ok"}">${over
           ? `Above the bad-day mark. At this level the check fires on about ${r.row ? r.row.fires_per_30d : "?"} days a month and is right ${r.row ? Math.round(r.row.precision * 100) : "?"}% of the time.`
