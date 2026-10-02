@@ -639,8 +639,11 @@ function riskRender() {
         <span class="badge warn">Not a prediction — the model is only informative above
           ${K.quiet_census} arrivals/day.</span></div>`;
     } else {
-      const pct = r.row ? r.row.pct : 50;
-      const over = r.pred >= r.bad;
+      // The warning line is the Youden point for THIS type of day, recomputed on every upload
+      // (risk.json.warn). Falls back to the bad-day mark only if the file predates it.
+      const w = (K.warn || {})[r.band];
+      const line = w ? w.cut : r.bad;
+      const over = r.pred >= line;
       main = `<div class="card">
         <div class="mute">Projected wait for a room today (${hm(last.min)}, ${r0(last.am)} arrived)</div>
         <div class="big">${r0(r.pred)} min</div>
@@ -650,8 +653,11 @@ function riskRender() {
           r.flex == null ? "" : ` · Flex ${r.flex ? "on" : r.flexOpen ? "<b>open shift, not filled</b>" : "<b>off</b>"}`}${
           r.comp > 0 ? ", slower than average" : r.comp < 0 ? ", faster than average" : ""}</div>
         <span class="badge ${over ? "warn" : "ok"}">${over
-          ? `Above the bad-day mark. At this level the check fires on about ${r.row ? r.row.fires_per_30d : "?"} days a month and is right ${r.row ? Math.round(r.row.precision * 100) : "?"}% of the time.`
-          : `Below the bad-day mark.`} On ${r.band} days it ranks correctly ${Math.round(r.sk.auc * 100)}% of the time (typical miss ±${r0(r.sk.mae)} min).</span>
+          ? `<b>Warning:</b> at or above ${r0(line)} min, the warning line for a ${r.band} day.`
+          : `No warning: below ${r0(line)} min, the warning line for a ${r.band} day.`}${w
+          ? ` On past ${r.band} days this line caught ${Math.round(w.caught * 100)}% of bad days and was right
+             ${Math.round(w.right * 100)}% of the time when it warned (tested on months it was not chosen from).`
+          : ""} On ${r.band} days it ranks correctly ${Math.round(r.sk.auc * 100)}% of the time (typical miss ±${r0(r.sk.mae)} min).</span>
       </div>`;
     }
   }
