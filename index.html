@@ -268,6 +268,7 @@ function render() {
   </div>
   <div class="card"><h2>Arrivals by hour</h2>${chart(v)}</div>
   ${rows}
+  ${accArrivals()}
   <div class="card">
     <h2>Context</h2>
     ${fb != null ? `<p>Forecast before today's data: <b>${r0(fb)}</b>.</p>` : ""}
@@ -497,7 +498,7 @@ function waitRender() {
     <tr><th>As of</th><th>WR</th><th>Total</th><th>Worst stretch</th><th></th></tr>
     ${es.map(e => `<tr><td>${hm(e.min)}</td><td>${e.wr}</td><td>${e.tp}</td><td>${r0(e.p50)} min</td>
       <td><button class="link" data-cdel="${e.min}">remove</button></td></tr>`).join("")}</table></div>` : "";
-  $("#capp").innerHTML = `${main}${rows}${waitScores()}
+  $("#capp").innerHTML = `${main}${rows}${waitScores()}${accWait()}
   <details class="card"><summary>How this works</summary>
     <p>The wait is the time from arriving to getting a room, in minutes, measured from the
     department's own records. Patients who leave without being roomed are counted at the time they
@@ -611,6 +612,78 @@ function riskProject(dateIso, am, min) {
           bad: K.bad_day_threshold, reliable: band !== "quiet"};
 }
 
+// ── "How accurate is this?" cards (operator 2026-10-02: make the validation visible) ────────────
+// Every number below is read from the model file the builder writes on each upload, measured on
+// past days the model was not fitted on. Nothing here is typed in or hard-coded.
+const pc = x => x == null ? "—" : Math.round(x * 100) + "%";
+const f1 = x => x == null ? "—" : x.toFixed(1);
+const better = (m, t) => (m == null || !t) ? "—" : Math.round((1 - m / t) * 100) + "%";
+
+function accArrivals() {
+  if (!D || !D.skill_by_hour) return "";
+  const pick = [8, 10, 12, 14, 16, 18], S = D.skill_by_hour.filter(r => pick.includes(r.cut));
+  const n = (S[0] || {}).n;
+  return `<div class="card"><h2>How accurate is this?</h2>
+    <p class="mute">Tested on ${n ? n.toLocaleString() : "past"} days, each year scored by a model fitted
+    only on the other years. "Off by" is the average miss on the day's total.</p>
+    <table><tr><th>Checked at</th><th>This app</th><th>Count so far + typical rest</th><th>Typical-day guess</th></tr>
+    ${S.map(r => `<tr><td>${hh(r.cut)}</td><td><b>${f1(r.mae_nowcast)}</b></td>
+      <td>${f1(r.mae_count)}</td><td>${f1(r.mae_typical)}</td></tr>`).join("")}</table>
+    <p class="mute">Reliable from ${D.reliable_from != null ? hh(D.reliable_from) : "—"}: from then on it beats a
+    typical-day guess by at least 10%. Most of the gain later in the day comes from counting
+    arrivals already in, not from forecasting — compare the first two columns. It says little about
+    how many will arrive this evening specifically. The likely range is built from these same past
+    misses, so "8 in 10" holds by construction.</p></div>`;
+}
+
+function accWait() {
+  if (!C || !C.skill) return "";
+  const pick = [9, 12, 15, 18, 20], S = C.skill.filter(r => pick.includes(r.cut));
+  const cov = C.band_coverage, fb = ((C.skill.find(r => r.cut === 12) || {}).flex_bias) || {};
+  const nf = fb["0"], wf = fb["1"];
+  return `<div class="card"><h2>How accurate is this?</h2>
+    <p class="mute">Tested on ${(S[0] || {}).n?.toLocaleString() ?? "past"} evenings, each year scored by a model
+    fitted only on the other years. "Off by" is the average miss on tonight's worst stretch, in minutes.</p>
+    <table><tr><th>Reading at</th><th>This app</th><th>Typical-evening guess</th><th>Better by</th></tr>
+    ${S.map(r => `<tr><td>${hh(r.cut)}</td><td><b>${r0(r.mae_model)}</b></td><td>${r0(r.mae_typical)}</td>
+      <td>${better(r.mae_model, r.mae_typical)}</td></tr>`).join("")}</table>
+    <p class="mute">Reliable from ${C.reliable_from != null ? hh(C.reliable_from) : "—"} (at least 10% better than
+    the typical-evening guess). The evening's worst wait swings widely, so even at its best the miss is
+    large — read the range, not the single number.
+    ${cov ? ` At noon, ${cov.inside} of ${cov.n} past evenings (${pc(cov.inside / cov.n)}) landed inside the likely
+    range, against 8 in 10 intended.` : ""}
+    ${nf && wf && nf.mean != null && wf.mean != null ? ` With tonight's roster in the model, its noon estimate has run
+    ${r0(Math.abs(nf.mean))} min ${nf.mean >= 0 ? "low" : "high"} on nights without Flex and ${r0(Math.abs(wf.mean))} min
+    ${wf.mean >= 0 ? "low" : "high"} on nights with it (${nf.n} and ${wf.n} nights).` : ""}</p></div>`;
+}
+
+function accRisk() {
+  if (!K || !K.skill) return "";
+  const B = K.skill.by_census, W = K.warn || {};
+  const band = [["quiet", `under ${K.quiet_census}`], ["middle", `${K.quiet_census}–144`], ["busy", "145 or more"]];
+  return `<div class="card"><h2>How accurate is this?</h2>
+    <p class="mute">Tested on ${K.skill.scored} days, each predicted using only the days before it. A
+    <b>bad day</b> is one whose average wait for a room is ${r0(K.bad_day_threshold)} min or more (the worst
+    quarter of days). "Picks the bad day" means: given one bad and one ordinary day, how often it gives the
+    bad one the higher warning — 50% is a coin flip.</p>
+    <table><tr><th>Type of day (projected arrivals)</th><th>Picks the bad day</th><th>Typical miss</th></tr>
+    ${band.filter(([k]) => B[k]).map(([k, lab]) => `<tr><td>${k} · ${lab}</td><td><b>${pc(B[k].auc)}</b></td>
+      <td>±${r0(B[k].mae)} min</td></tr>`).join("")}
+    <tr><td>all days</td><td><b>${pc(K.skill.overall_auc)}</b></td><td>±${r0(K.skill.overall_mae)} min</td></tr></table>
+    ${Object.keys(W).length ? `<h2 style="margin-top:14px">The warning line</h2>
+    <p class="mute">Set automatically for each type of day so that catching bad days and leaving ordinary
+    days alone are weighed equally (the Youden point), and re-set on every data upload. Each month below
+    was tested with a line chosen from the other months.</p>
+    <table><tr><th>Type of day</th><th>Warns at</th><th>Bad days caught</th><th>Right when it warns</th><th>Warnings per 30 such days</th></tr>
+    ${["middle", "busy"].filter(k => W[k]).map(k => `<tr><td>${k}</td><td>${r0(W[k].cut)} min</td>
+      <td><b>${pc(W[k].caught)}</b></td><td><b>${pc(W[k].right)}</b></td><td>${W[k].warnings_per_30_band_days}</td></tr>`).join("")}
+    </table>
+    <p class="mute">About one warning in three is a false alarm — that is the price of catching more than half
+    of bad days. Quiet days get no warning because the check is barely better than a coin flip there.
+    ${Object.values(W).some(w => w.source === "overall") ? " A type of day with fewer than 30 bad days so far borrows the all-days line." : ""}</p>` : ""}
+  </div>`;
+}
+
 function riskEntries() { try { return JSON.parse(localStorage.getItem(RKEY)) || {}; } catch { return {}; } }
 function riskSave(e) { try { localStorage.setItem(RKEY, JSON.stringify(e)); } catch {} }
 
@@ -650,14 +723,13 @@ function riskRender() {
         <div class="band">a typical ${esc(new Date(today + "T12:00:00").toLocaleDateString("en-US", {weekday: "long"}))}
           this month is ${r0(r.cl)} min · a bad day starts around ${r0(r.bad)}</div>
         <div class="band">tracking toward <b>${r0(r.estN)}</b> arrivals · roster <b>${r.hc}</b> providers seeing patients${
-          r.flex == null ? "" : ` · Flex ${r.flex ? "on" : r.flexOpen ? "<b>open shift, not filled</b>" : "<b>off</b>"}`}${
-          r.comp > 0 ? ", slower than average" : r.comp < 0 ? ", faster than average" : ""}</div>
+          r.flex == null ? "" : ` · Flex ${r.flex ? "on" : r.flexOpen ? "<b>open shift, not filled</b>" : "<b>off</b>"}`}</div>
         <span class="badge ${over ? "warn" : "ok"}">${over
           ? `<b>Warning:</b> at or above ${r0(line)} min, the warning line for a ${r.band} day.`
-          : `No warning: below ${r0(line)} min, the warning line for a ${r.band} day.`}${w
-          ? ` On past ${r.band} days this line caught ${Math.round(w.caught * 100)}% of bad days and was right
+          : `No warning: below ${r0(line)} min, the warning line for a ${r.band} day.`}</span>${w
+          ? `<p class="mute">On past ${r.band} days this line caught ${Math.round(w.caught * 100)}% of bad days and was right
              ${Math.round(w.right * 100)}% of the time when it warned (tested on months it was not chosen from).`
-          : ""} On ${r.band} days it ranks correctly ${Math.round(r.sk.auc * 100)}% of the time (typical miss ±${r0(r.sk.mae)} min).</span>
+          : `<p class="mute">`} On ${r.band} days it ranks correctly ${Math.round(r.sk.auc * 100)}% of the time (typical miss ±${r0(r.sk.mae)} min).</p>
       </div>`;
     }
   }
@@ -665,23 +737,22 @@ function riskRender() {
     <tr><th>As of</th><th>Arrived</th><th>Projected</th><th></th></tr>
     ${es.map(e => `<tr><td>${hm(e.min)}</td><td>${e.am}</td><td>${e.p == null ? "—" : r0(e.p) + " min"}</td>
       <td><button class="link" data-rdel="${e.min}">remove</button></td></tr>`).join("")}</table></div>` : "";
-  $("#rapp").innerHTML = `${main}${rows}
+  $("#rapp").innerHTML = `${main}${rows}${accRisk()}
   <details class="card"><summary>How this works, and what it can't do</summary>
-    <p>It combines three things known before noon: how many patients have arrived so far, how many
-    physicians are rostered today, and what this weekday in this month usually looks like.</p>
-    <p><b>It only works on busy days.</b> Tested on ${K.skill.scored} days it had never seen, it
-    ranks the worst quarter of days correctly ${Math.round((K.skill.by_census.busy || {auc: 0}).auc * 100)}% of the time when
-    ${145}+ patients arrive, ${Math.round((K.skill.by_census.middle || {auc: 0}).auc * 100)}% in the middle, and
-    <b>worse than chance when under ${K.quiet_census}</b> — which is why it stays silent there.</p>
-    <p>Who is on the roster matters more when the department is busy and barely at all when it is
-    quiet, so the roster's composition is weighted by how busy the day is tracking.</p>
-    <p><b>It tells you the day is going badly. It does not tell you that another doctor would fix
-    it.</b> About 70% of the wait is time spent queuing for a room while beds sit empty, and three
-    separate physician mechanisms have been tested against that queue without reaching it. Treat
-    this as a heads-up, not as an instruction.</p>
+    <p>It combines things known by about noon: how many patients have arrived so far, what this
+    weekday in this month usually looks like, and today's roster — how many providers are seeing
+    patients, whether the evening Flex shift is filled, and how many evening APPs are on. The roster
+    needs no typing; an unfilled "OPEN SHIFT" counts as nobody.</p>
+    <p>Your count is turned into a projection of the whole day using this month and weekday's usual
+    hour-by-hour pattern, so a reading at 10:00 or 14:00 works as well as one at noon.</p>
+    <p><b>It is weakest on quiet days</b> (under ${K.quiet_census} projected arrivals), where it is barely
+    better than a coin flip, so it stays silent there. The accuracy card above has the numbers.</p>
+    <p><b>It tells you the day is going badly. It does not tell you that calling someone in would fix
+    it.</b> Days with Flex and an evening APP scheduled do run shorter waits, but that was measured on
+    the schedule as planned, not on extra cover added the same day. About 70% of the wait is time
+    spent queuing for a room while beds sit empty. Treat this as a heads-up, not an instruction.</p>
     <p>Fitted on ${K.history.days.toLocaleString()} days with a roster (${esc(K.history.first)} to
-    ${esc(K.history.last)}); physician speeds measured on ${esc(K.ruler.window[0].slice(0, 4))}, a year
-    this never scores.</p>
+    ${esc(K.history.last)}).</p>
   </details>`;
   document.querySelectorAll("[data-rdel]").forEach(el => el.onclick = () => {
     const all = riskEntries(), t = ptNow().date;
